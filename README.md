@@ -28,8 +28,14 @@ remain to be verified.
 | RouterOS neighbor evidence and conservative LLDP topology export | Implemented; protocol/port uncertainty retained in diagnostics; 10.6.106 API tested |
 | Independent devices, inventory CLI and separate CRS326 Compose service | Implemented; isolated processes/state/keys, eight- and 26-slot profiles |
 | UGW3 gateway, configurable read-only WAN interface (default ether1) | [Gateway deployment](docs/gateway-wan.md); separate identity and WAN observations |
+| RB5009 / mAP lite as UniFi switches: LLDP topology, LAG, PoE, real-MAC identity | [MikroTik RB5009 / mAP lite guide](docs/mikrotik-routeros-switches.md); map, LAG and PoE confirmed in UniFi OS Server 5.1.42 / Network 10.6.106 |
 | VLAN / router configuration | Unsupported |
 | Applying controller configuration to MikroTik | Unsupported by design |
+
+**MikroTik RB5009 / mAP lite:** ready-made Compose files show both routers as UniFi
+switches with ports, clients, topology map, LACP and PoE. Site values (addresses, API
+user, MACs) go into local `.env` files that are never committed. Start with the
+[step-by-step guide](docs/mikrotik-routeros-switches.md).
 
 ## Development quick start
 
