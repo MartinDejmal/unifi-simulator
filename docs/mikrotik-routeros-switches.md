@@ -56,7 +56,7 @@ The account needs no `write`, `policy`, `sensitive`, `ssh` or `ftp` rights.
 ## 2. Clone and run the setup script
 
 ```bash
-git clone -b moje https://github.com/joazif/unifi-simulator.git ~/docker/unifi-sim
+git clone https://github.com/MartinDejmal/unifi-simulator.git ~/docker/unifi-sim
 cd ~/docker/unifi-sim
 scripts/setup-mikrotik.sh rb5009
 scripts/setup-mikrotik.sh maplite
