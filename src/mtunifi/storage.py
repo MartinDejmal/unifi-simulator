@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from mtunifi.profiles import profile
 
@@ -31,6 +31,9 @@ class State(BaseModel):
     last_error: str | None = None
     profile: str | None = None
     routeros_host: str | None = Field(default=None, pattern=r"^[A-Za-z0-9.:-]{1,253}$")
+    # "configured": the operator explicitly chose this (possibly physical) MAC, e.g. the
+    # RouterOS LLDP chassis MAC, so the controller can match neighbor/FDB evidence to the device.
+    mac_source: Literal["synthetic", "configured"] = "synthetic"
 
     @field_validator("profile")
     @classmethod
@@ -60,9 +63,15 @@ class State(BaseModel):
     @classmethod
     def valid_mac(cls, value: str) -> str:
         raw = bytes.fromhex(value.replace(":", ""))
-        if len(raw) != 6 or raw[0] & 3 != 2:
-            raise ValueError("Identity must be a locally administered unicast MAC")
+        if len(raw) != 6 or raw[0] & 1:
+            raise ValueError("Identity must be a unicast MAC")
         return ":".join(f"{b:02x}" for b in raw)
+
+    @model_validator(mode="after")
+    def synthetic_mac_is_local(self):
+        if self.mac_source == "synthetic" and int(self.mac[:2], 16) & 2 != 2:
+            raise ValueError("Identity must be a locally administered unicast MAC")
+        return self
 
     @field_validator("authkey")
     @classmethod
@@ -109,12 +118,19 @@ class Store:
     def load(self) -> State:
         return State.model_validate_json(self.path.read_bytes())
 
-    def load_or_create(self) -> State:
+    def load_or_create(self, configured_mac: str | None = None) -> State:
+        wanted = configured_mac.lower() if configured_mac else None
         if self.path.exists():
-            return self.load()  # Corrupt state must never silently create a new identity.
-        mac = bytearray(secrets.token_bytes(6))
-        mac[0] = (mac[0] | 2) & 254
-        state = State(mac=":".join(f"{b:02x}" for b in mac))
+            state = self.load()  # Corrupt state must never silently create a new identity.
+            if wanted is not None and state.mac != wanted:
+                raise StateBindingError("Configured MAC differs from persisted identity")
+            return state
+        if wanted is not None:
+            state = State(mac=wanted, mac_source="configured")
+        else:
+            mac = bytearray(secrets.token_bytes(6))
+            mac[0] = (mac[0] | 2) & 254
+            state = State(mac=":".join(f"{b:02x}" for b in mac))
         self.save(state)
         return state
 

@@ -22,6 +22,37 @@ PROFILES = {
     "us8-experimental": DeviceProfile(
         "us8-experimental", "US8", "UniFi Switch 8", "4.3.28.11361", "5.4.0", (1000,) * 8
     ),
+    # mAP lite: ether1 (100M), pwr-line1 (internal) and wlan1 (2.4 GHz); the model code stays US8.
+    "maplite-experimental": DeviceProfile(
+        "maplite-experimental",
+        "US8",
+        "UniFi Switch 8",
+        "7.24.5.0",  # mirrors the RouterOS version shown in UniFi; update when RouterOS changes
+        "5.4.0",
+        (100, 100, 300),
+    ),
+    # RB5009 as a gateway that reports all its ports. UGWXG (USG XG 8) has exactly nine
+    # interfaces eth0-eth8 in the controller's uidb; each mapped slot names its ifname.
+    # Override the model code with MTUNIFI_DEVICE_MODEL.
+    "rb5009-gateway-experimental": DeviceProfile(
+        "rb5009-gateway-experimental",
+        "UGWXG",
+        "UniFi Security Gateway XG 8",
+        "7.24.5.0",
+        "5.4.0",
+        (2500,) + (1000,) * 7 + (10000,),
+        "gateway",
+    ),
+    # RB5009 as a switch: USW Flex 2.5G 8 has ports 1-8 (2.5G) and a 9/10 RJ45/SFP+ combo.
+    # A switch view keeps UniFi Network updatable (an adopted USG pins it to 10.6).
+    "rb5009-switch-experimental": DeviceProfile(
+        "rb5009-switch-experimental",
+        "USWED36",
+        "UniFi Switch Flex 2.5G 8",
+        "7.24.5.0",
+        "5.4.0",
+        (2500,) * 8 + (10000, 10000),
+    ),
     "usw-pro24-experimental": DeviceProfile(
         "usw-pro24-experimental",
         "US24PRO2",

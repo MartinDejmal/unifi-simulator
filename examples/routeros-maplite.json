@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "profile": "maplite-experimental",
+  "ports": [
+    {"port_idx": 1, "interface": "ether1", "is_uplink": true},
+    {"port_idx": 2, "interface": "pwr-line1"},
+    {"port_idx": 3, "interface": "wlan1", "assumed_speed_mbps": 100}
+  ]
+}

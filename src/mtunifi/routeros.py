@@ -1,6 +1,7 @@
 """Read-only RouterOS collector with explicit physical-port mapping and reconnects."""
 
 import asyncio
+import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import Literal
 
 from pydantic import Field, ValidationError, field_validator, model_validator
 
-from mtunifi.clients import ClientTracker, correlate_clients
+from mtunifi.clients import ClientTracker, correlate_clients, mac_address
 from mtunifi.config import Settings
 from mtunifi.gateway import collect_gateway, gateway_snapshot
 from mtunifi.neighbors import collect_neighbors
@@ -34,14 +35,26 @@ from mtunifi.snapshot import (
     DeviceSnapshot,
     LogicalInterface,
     PhysicalPort,
+    PortPoE,
     unifi_snapshot,
 )
+
+AUTO_MAP = Path("auto")
+
+# Interface types that may fill a slot without an ethernet monitor (link speed unknown).
+UNMONITORED_TYPES = ("ether", "wlan", "wifi")
+BOND_TYPES = ("bond", "bonding")
 
 
 class PortMapping(LabModel):
     port_idx: int = Field(ge=1, le=26)
     interface: str = Field(min_length=1, max_length=128)
     is_uplink: bool = False
+    # Declared by the operator for interfaces without a link monitor (e.g. wlan);
+    # reported while the interface is up, flagged in warnings, never measured.
+    assumed_speed_mbps: int | None = Field(default=None, ge=1, le=100000)
+    # Gateway interface name the controller expects for this slot (e.g. eth8 on a UGWXG).
+    ifname: str | None = Field(default=None, pattern=r"^eth\d{1,2}$")
 
     @field_validator("interface")
     @classmethod
@@ -64,6 +77,9 @@ class RouterOSMap(LabModel):
             {p.interface for p in self.ports}
         ) != len(self.ports):
             raise ValueError("Each slot and interface must have one mapping")
+        ifnames = [p.ifname for p in self.ports if p.ifname is not None]
+        if len(set(ifnames)) != len(ifnames):
+            raise ValueError("Each gateway ifname must have one mapping")
         return self
 
 
@@ -79,7 +95,14 @@ def load_mapping(path: Path) -> RouterOSMap:
 
 
 async def collect_device(
-    api: RouterOSAPI, mapping: RouterOSMap, device_mac: str = ""
+    api: RouterOSAPI,
+    mapping: RouterOSMap,
+    device_mac: str = "",
+    *,
+    relaxed_neighbors: bool = False,
+    neighbor_mac_aliases: dict[str, str] | None = None,
+    uplink_from_arp: bool = False,
+    read_poe: bool = False,
 ) -> DeviceSnapshot:
     resources = await api.table(Table.RESOURCE)
     if len(resources) != 1:
@@ -106,29 +129,43 @@ async def collect_device(
     ports = []
     for item in sorted(mapping.ports, key=lambda p: p.port_idx):
         eth, stats = ethernet.get(item.interface), interfaces.get(item.interface)
-        if eth is None or stats is None or stats.get("type") != "ether":
+        unmonitored = eth is None and stats is not None and stats.get("type") in UNMONITORED_TYPES
+        if (
+            stats is None
+            or (eth is None and not unmonitored)
+            or (eth is not None and stats.get("type") != "ether")
+        ):
             raise RouterOSError("mapped-physical-interface-missing")
+        eth = eth or {}
         disabled, running = boolean(stats.get("disabled")), boolean(stats.get("running"))
         rx, tx = number(stats.get("rx-byte")), number(stats.get("tx-byte"))
         if disabled is None or running is None or rx is None or tx is None:
             raise RouterOSError("required-interface-data-missing")
         monitor = None
-        try:
-            records = await api.monitor(eth.get(".id", item.interface))
-            if len(records) == 1:
-                monitor = records[0]
-        except RouterOSError as exc:
-            if exc.code not in ("permission-denied", "endpoint-unavailable", "request-rejected"):
-                raise
-        if monitor is None:
-            warnings.append(f"port-{item.port_idx}:monitor-unavailable")
+        if not unmonitored:
+            try:
+                records = await api.monitor(eth.get(".id", item.interface))
+                if len(records) == 1:
+                    monitor = records[0]
+            except RouterOSError as exc:
+                if exc.code not in (
+                    "permission-denied",
+                    "endpoint-unavailable",
+                    "request-rejected",
+                ):
+                    raise
+            if monitor is None:
+                warnings.append(f"port-{item.port_idx}:monitor-unavailable")
         monitor = monitor or {}
         up = not disabled and running
         if monitor.get("status") in ("no-link", "link-ok"):
             up = not disabled and monitor["status"] == "link-ok"
         speed = link_speed(monitor.get("rate")) if up else None
         duplex = boolean(monitor.get("full-duplex")) if up else None
-        if up and (speed is None or duplex is None):
+        if up and unmonitored and item.assumed_speed_mbps is not None:
+            speed, duplex = item.assumed_speed_mbps, True
+            warnings.append(f"port-{item.port_idx}:assumed-speed")
+        if up and not unmonitored and (speed is None or duplex is None):
             warnings.append(f"port-{item.port_idx}:link-details-unavailable")
         if speed is not None and speed > profile(mapping.profile).max_speeds[item.port_idx - 1]:
             warnings.append(f"port-{item.port_idx}:exceeds-profile-capacity")
@@ -137,7 +174,7 @@ async def collect_device(
                 port_idx=item.port_idx,
                 name=item.interface,
                 default_name=text(eth.get("default-name")),
-                mac=text(eth.get("mac-address"), 17),
+                mac=text(eth.get("mac-address") or stats.get("mac-address"), 17),
                 enabled=not disabled,
                 up=up,
                 speed_mbps=speed,
@@ -150,6 +187,8 @@ async def collect_device(
                 is_uplink=item.is_uplink,
             )
         )
+    if read_poe:
+        ports = await with_poe(api, ports, warnings)
     # Logical interfaces are inventory/context only; never count them as physical ports.
     vlans = (
         await optional(Table.VLANS)
@@ -158,14 +197,15 @@ async def collect_device(
     )
     bonds = (
         await optional(Table.BONDS)
-        if any(i.get("type") == "bonding" for i in interfaces.values())
+        if any(i.get("type") in BOND_TYPES for i in interfaces.values())
         else []
     )
     vlan_by_name = {r.get("name"): r for r in vlans or []}
     bond_by_name = {r.get("name"): r for r in bonds or []}
     logical = []
     for name, row in interfaces.items():
-        kind = row.get("type")
+        # RouterOS 7 reports bonding interfaces with type "bond".
+        kind = "bonding" if row.get("type") in BOND_TYPES else row.get("type")
         if kind not in ("bridge", "vlan", "bonding"):
             continue
         vlan, bond = vlan_by_name.get(name, {}), bond_by_name.get(name, {})
@@ -228,15 +268,173 @@ async def collect_device(
         device_mac=device_mac,
         extra_local_macs=tuple(row.get("mac-address") for row in ethernet.values()),
     )
-    return collect_neighbors(
+    local_macs = (
+        device_mac,
+        *(r.get("mac-address") for r in interfaces.values()),
+        *(r.get("mac-address") for r in ethernet.values()),
+        *(r.get(k) for r in bridge_rows or () for k in ("mac-address", "admin-mac")),
+    )
+    snapshot = collect_neighbors(
         snapshot,
         neighbors,
-        local_macs=(
-            device_mac,
-            *(r.get("mac-address") for r in interfaces.values()),
-            *(r.get("mac-address") for r in ethernet.values()),
-            *(r.get(k) for r in bridge_rows or () for k in ("mac-address", "admin-mac")),
+        local_macs=local_macs,
+        relaxed=relaxed_neighbors,
+        mac_aliases=neighbor_mac_aliases,
+    )
+    if uplink_from_arp:
+        snapshot = uplink_neighbor(snapshot, mapping, arp, local_macs)
+    return snapshot
+
+
+def poe_number(value: str | None) -> float | None:
+    """RouterOS PoE readings such as "24.4", "24.4V", "93mA" or "2.2W"."""
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(?:V|mA|W)?\s*", value or "")
+    return float(match[1]) if match else None
+
+
+async def with_poe(api: RouterOSAPI, ports: list, warnings: list) -> list:
+    """Attach observed PoE-out state to RJ45 ports; unsupported/forbidden reads only warn."""
+    names = tuple(p.name for p in ports if p.name.startswith("ether"))
+    if not names:
+        return ports
+    try:
+        rows = await api.poe_monitor(names)
+    except RouterOSError as exc:
+        if exc.code not in ("permission-denied", "endpoint-unavailable", "request-rejected"):
+            raise
+        warnings.append("poe:" + exc.code)
+        return ports
+    by_name = {r.get("name"): r for r in rows}
+    result = []
+    for port in ports:
+        row = by_name.get(port.name)
+        if row is None:
+            result.append(port)
+            continue
+        poe = PortPoE(
+            mode=text(row.get("poe-out")),
+            status=text(row.get("poe-out-status")),
+            voltage=poe_number(row.get("poe-out-voltage")),
+            current_ma=poe_number(row.get("poe-out-current")),
+            power_w=poe_number(row.get("poe-out-power")),
+        )
+        result.append(replace(port, poe=poe))
+    return result
+
+
+def uplink_neighbor(
+    snapshot: DeviceSnapshot, mapping: RouterOSMap, arp: list[dict] | None, local_macs
+) -> DeviceSnapshot:
+    """The single resolved ARP neighbor on the uplink port (e.g. the ISP gateway)."""
+    names = {p.interface for p in mapping.ports if p.is_uplink}
+    local = {mac_address(m) for m in local_macs} - {None}
+    candidates = (
+        {
+            mac_address(r.get("mac-address"))
+            for r in arp or ()
+            if r.get("interface") in names
+            and boolean(r.get("invalid")) is not True
+            and boolean(r.get("disabled")) is not True
+            and r.get("status") not in ("failed", "incomplete")
+        }
+        - local
+        - {None}
+    )
+    if len(candidates) == 1:
+        return replace(snapshot, uplink_neighbor_mac=next(iter(candidates)))
+    reason = "uplink-arp:none" if not candidates else "uplink-arp:ambiguous"
+    return replace(snapshot, warnings=tuple(sorted({*snapshot.warnings, reason})))
+
+
+def poe_totals(snapshot: DeviceSnapshot, budget_w: float) -> dict:
+    """Device-level PoE budget/usage as a UniFi PoE switch reports it."""
+    used = sum(
+        p.poe.power_w or 0.0
+        for p in snapshot.ports
+        if p.poe is not None and p.poe.status == "powered-on"
+    )
+    return {
+        "total_max_power": budget_w,
+        "total_max_effective_power": budget_w,
+        "total_used_power": round(used, 2),
+    }
+
+
+def management_interface(body: dict, device_mac: str, device_ip: str) -> dict:
+    """Uplink name and eth0 interface, mirroring the uplink port's observed link state."""
+    uplink = next((p for p in body["port_table"] if p.get("is_uplink")), None)
+    entry = {"name": "eth0", "ip": device_ip, "up": bool(uplink and uplink.get("up"))}
+    if device_mac:
+        entry["mac"] = device_mac
+    if uplink is not None:
+        for key in ("speed", "full_duplex", "rx_bytes", "tx_bytes"):
+            if key in uplink:
+                entry[key] = uplink[key]
+    return {"uplink": "eth0", "if_table": [entry]}
+
+
+def natural_key(name: str) -> tuple:
+    return tuple(int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name))
+
+
+def ether1(rows: list[dict]) -> dict | None:
+    """The router's first Ethernet port: default-name ether1, else the lowest ether name."""
+    by_default = [r for r in rows if r.get("default-name") == "ether1"]
+    if by_default:
+        return by_default[0]
+    ethers = sorted(
+        (r for r in rows if str(r.get("name", "")).startswith("ether")),
+        key=lambda r: natural_key(r["name"]),
+    )
+    return ethers[0] if ethers else None
+
+
+async def discover_device_mac(settings: Settings) -> str:
+    """Read the ether1 MAC (RouterOS LLDP chassis ID) for a new device identity."""
+    api = RouterOSAPI(settings)
+    async with asyncio.timeout(settings.routeros_timeout):
+        async with api:
+            row = ether1(await api.table(Table.ETHERNET))
+    mac = mac_address(row.get("mac-address")) if row else None
+    if mac is None or int(mac[:2], 16) & 1:
+        raise RouterOSError("device-mac-unavailable", stage=Table.ETHERNET.value)
+    return mac
+
+
+async def auto_mapping(api: RouterOSAPI, profile_name: str) -> RouterOSMap:
+    """Map RouterOS ports to slots in order: ether*, sfp*, other Ethernet-type, wireless."""
+    ethernet = await api.table(Table.ETHERNET)
+    interfaces = await api.table(Table.INTERFACES)
+    names = [str(r.get("name")) for r in ethernet if r.get("name")]
+
+    def group(name: str) -> int:
+        return 0 if name.startswith("ether") else 1 if name.startswith("sfp") else 2
+
+    ordered = sorted(names, key=lambda n: (group(n), natural_key(n)))
+    known = set(ordered)
+    others = sorted(
+        (
+            str(r["name"])
+            for r in interfaces
+            if r.get("name") and r["name"] not in known and r.get("type") == "ether"
         ),
+        key=natural_key,
+    )
+    wireless = sorted(
+        (str(r["name"]) for r in interfaces if r.get("type") in ("wlan", "wifi") and r.get("name")),
+        key=natural_key,
+    )
+    slots = (ordered + others + wireless)[: profile(profile_name).port_count]
+    if not slots:
+        raise RouterOSError("no-physical-ports", stage=Table.ETHERNET.value)
+    first = ether1(ethernet)
+    uplink = first.get("name") if first else slots[0]
+    return RouterOSMap(
+        profile=profile_name,
+        ports=[
+            PortMapping(port_idx=i, interface=name, is_uplink=name == uplink)
+            for i, name in enumerate(slots, 1)
+        ],
     )
 
 
@@ -244,9 +442,22 @@ class RouterOSSource:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.gateway = profile(settings.profile).kind == "gateway"
-        self.mapping = None if self.gateway else load_mapping(settings.routeros_map_file)
-        if self.mapping is not None and self.mapping.profile != settings.profile:
-            raise RouterOSError("port-map-profile-mismatch")
+        self.mapping = None
+        self._auto_map = settings.routeros_map_file == AUTO_MAP
+        if settings.routeros_map_file is not None and not self._auto_map:
+            self.mapping = load_mapping(settings.routeros_map_file)
+            if self.mapping.profile != settings.profile:
+                if not self.gateway:
+                    raise RouterOSError("port-map-profile-mismatch")
+                # Gateways historically ignored a port map: only a map written for this very
+                # profile makes the gateway report its ports next to the WAN.
+                self.mapping = None
+        self._neighbor_options = {
+            "relaxed_neighbors": settings.routeros_neighbors_relaxed,
+            "neighbor_mac_aliases": settings.neighbor_mac_aliases,
+            "uplink_from_arp": settings.routeros_uplink_from_arp,
+            "read_poe": settings.routeros_poe,
+        }
         self.status = "unavailable"
         self.last_summary = None
         self._snapshot: DeviceSnapshot | None = None
@@ -265,11 +476,24 @@ class RouterOSSource:
                     # One bounded session per poll: failures reconnect without sharing credentials
                     # or a socket with another device. Secret rotations apply on the next poll.
                     async with api:
-                        snapshot = (
-                            await collect_gateway(api, self.settings)
-                            if self.gateway
-                            else await collect_device(api, self.mapping, device_mac)
-                        )
+                        if self._auto_map and self.mapping is None:
+                            self.mapping = await auto_mapping(api, self.settings.profile)
+                        if self.gateway:
+                            snapshot = await collect_gateway(api, self.settings)
+                            if self.mapping is not None:
+                                ports = await collect_device(
+                                    api, self.mapping, device_mac, **self._neighbor_options
+                                )
+                                snapshot = replace(
+                                    ports,
+                                    wan=snapshot.wan,
+                                    wan2=snapshot.wan2,
+                                    warnings=tuple(sorted({*snapshot.warnings, *ports.warnings})),
+                                )
+                        else:
+                            snapshot = await collect_device(
+                                api, self.mapping, device_mac, **self._neighbor_options
+                            )
                 previous = self._snapshot
                 reset = previous is not None and (
                     snapshot.health.uptime_seconds < previous.health.uptime_seconds
@@ -307,15 +531,41 @@ class RouterOSSource:
         snapshot = self._snapshot
         body = None
         if snapshot is not None and self._error is None:
-            body = (
-                gateway_snapshot(snapshot, device_mac)
-                if self.gateway
-                else unifi_snapshot(
+            ports = (
+                unifi_snapshot(
                     snapshot,
                     age_seconds=max(0, int(now - self._observed_mono)),
                     port_count=profile(self.settings.profile).port_count,
+                    neighbor_macs=self.settings.routeros_neighbors_relaxed,
+                    uplink_lldp=self.settings.routeros_uplink_lldp_from_arp,
+                    report_lag=self.settings.report_lag,
                 )
+                if self.mapping is not None
+                else None
             )
+            if self.gateway:
+                ifnames = (
+                    {p.interface: p.ifname for p in self.mapping.ports}
+                    if self.mapping is not None and all(p.ifname for p in self.mapping.ports)
+                    else None
+                )
+                body = gateway_snapshot(snapshot, device_mac, ifnames)
+                if ports is not None and ifnames is None:
+                    body |= {k: ports[k] for k in ("port_table", "lldp_table") if k in ports}
+            else:
+                body = ports
+                if self.settings.report_uplink:
+                    body |= management_interface(body, device_mac, self.settings.device_ip)
+                if self.settings.poe_budget_w and any(p.poe for p in snapshot.ports):
+                    body |= poe_totals(snapshot, self.settings.poe_budget_w)
+        identity = snapshot.health.identity if snapshot is not None else None
+        if (
+            body is not None
+            and self.settings.hostname_from_identity
+            and identity is not None
+            and re.fullmatch(r"[A-Za-z0-9-]{1,63}", identity)
+        ):
+            body["hostname"] = identity
         clients = snapshot.wired.clients if snapshot and snapshot.wired else None
         self.last_summary = {
             "source": "routeros",
@@ -325,7 +575,12 @@ class RouterOSSource:
             "age_seconds": max(0, time.time() - self._observed_at)
             if self._observed_at is not None
             else None,
-            "active_clients": sum(len(p.get("mac_table", [])) for p in body["port_table"])
+            "active_clients": (
+                sum(len(p.get("mac_table", [])) for p in body["port_table"])
+                if "port_table" in body
+                # USG-style gateways have no per-port MAC tables; count attached clients.
+                else sum(c.attachment == "physical" for c in clients)
+            )
             if body is not None and clients is not None
             else None,
             "clients_status": "unavailable" if clients is None or body is None else "observed",

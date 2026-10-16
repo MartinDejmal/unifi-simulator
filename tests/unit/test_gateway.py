@@ -85,3 +85,20 @@ def test_gateway_default_wan_and_no_port_map_or_adopted_switch_reclassification(
     with pytest.raises(StateBindingError):
         old.bind("ugw3-experimental", "192.168.0.249")
     assert old.profile == "us8-experimental" and old.authkey is None
+
+
+def test_second_wan_is_exported_as_eth2_with_its_own_mac():
+    health = DeviceHealth("7.24.5", 10)
+    wan = WANObservation(
+        "ether1", "ether", True, True, 1, 2, 1000, True, "198.51.100.2", "255.255.255.0"
+    )
+    wan2 = WANObservation("ether5", "ether", True, False, 3, 4)
+    body = gateway_snapshot(DeviceSnapshot(health, (), wan=wan, wan2=wan2), "02:00:00:00:00:ff")
+    assert body["config_port_table"] == [
+        {"ifname": "eth0", "name": "wan", "type": "wan"},
+        {"ifname": "eth2", "name": "wan2", "type": "wan"},
+    ]
+    first, second = body["if_table"]
+    assert (first["name"], first["up"]) == ("eth0", True)
+    assert (second["name"], second["up"], second["speed"]) == ("eth2", False, 0)
+    assert second["mac"] == "02:00:00:00:00:00" and body["uplink"] == "eth0"

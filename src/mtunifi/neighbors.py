@@ -23,7 +23,11 @@ def collect_neighbors(
     rows: list[dict] | None,
     *,
     local_macs: tuple[str | None, ...] = (),
+    relaxed: bool = False,
+    mac_aliases: dict[str, str] | None = None,
 ) -> DeviceSnapshot:
+    """`relaxed` also accepts MNDP/CDP, merged-protocol rows and bond members (opt-in)."""
+    accepted = {"lldp", "cdp", "mndp"} if relaxed else {"lldp"}
     if rows is None:
         return replace(snapshot, neighbors=NeighborInventory(None))
     local = {mac_address(m) for m in local_macs} - {None}
@@ -41,6 +45,8 @@ def collect_neighbors(
         if interface.kind == "bonding"
         for member in interface.members or ()
     }
+    bonds = {i.name for i in snapshot.logical_interfaces if i.kind == "bonding"}
+    aliases = bridges | bonds if relaxed else bridges
     unknown_bond_members = any(
         i.kind == "bonding" and i.members is None for i in snapshot.logical_interfaces
     )
@@ -52,6 +58,8 @@ def collect_neighbors(
         if mac in local:
             excluded += 1
             continue
+        if mac is not None and mac_aliases:
+            mac = mac_aliases.get(mac, mac)
         raw_protocols = tokens(row.get("discovered-by"))
         protocols = tuple(sorted({p.lower() for p in raw_protocols})) or ("unknown",)
         identity = text(row.get("identity"))
@@ -69,21 +77,25 @@ def collect_neighbors(
         if not interfaces or (mac is None and identity is None):
             reason = "invalid-row"
             invalid += 1
-        elif port is None or any(i not in ports and i not in bridges for i in interfaces):
+        elif port is None or any(i not in ports and i not in aliases for i in interfaces):
             reason = "unresolved-local-interface"
         elif any(
-            alias in bridges and (port.name, alias) not in bridge_members for alias in interfaces
+            alias in bridges
+            and (port.name, alias) not in bridge_members
+            # A bonded member joins the bridge through its bond.
+            and not (relaxed and port.name in bonded)
+            for alias in interfaces
         ):
             reason = "unverified-bridge-alias"
-        elif port.name in bonded:
+        elif port.name in bonded and not relaxed:
             reason = "bond-member"
         elif unknown_bond_members:
             reason = "bond-membership-unknown"
         elif not port.enabled or not port.up:
             reason = "local-port-down"
-        elif "lldp" not in protocols:
+        elif not accepted & set(protocols):
             reason = "protocol-not-lldp"
-        elif protocols != ("lldp",):
+        elif not set(protocols) <= accepted:
             # Merged cache fields cannot be attributed to one advertised protocol.
             reason = "merged-protocols"
         elif mac is None:
@@ -117,7 +129,7 @@ def collect_neighbors(
     observations = list(deduplicated.values())
     by_port: dict[int, set[tuple]] = {}
     for n in observations:
-        if n.port_idx is not None and "lldp" in n.protocols:
+        if n.port_idx is not None and accepted & set(n.protocols):
             by_port.setdefault(n.port_idx, set()).add(
                 (n.mac, n.remote_port, n.identity, n.system_description)
             )

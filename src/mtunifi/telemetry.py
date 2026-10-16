@@ -22,9 +22,9 @@ def inform(
         snapshot = SyntheticSource(settings.synthetic_file).snapshot(0, state.mac)
     device_profile = profile(settings.profile)
     return {
-        "model": device_profile.model,
+        "model": settings.model_code,
         "model_display": device_profile.display,
-        "version": device_profile.version,
+        "version": settings.device_version or device_profile.version,
         "required_version": device_profile.required_version,
         "mac": state.mac,
         "serial": state.mac.replace(":", "").upper(),

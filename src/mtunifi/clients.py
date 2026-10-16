@@ -224,7 +224,8 @@ def correlate_clients(
             attachment = "ambiguous-fdb"
         elif port is None:
             kind = interfaces.get(interface, {}).get("type")
-            attachment = "aggregate-interface" if kind == "bonding" else "unmapped-interface"
+            aggregate = kind in ("bond", "bonding")  # RouterOS 7 reports type "bond".
+            attachment = "aggregate-interface" if aggregate else "unmapped-interface"
         elif not port.enabled or not port.up:
             attachment = "link-down"
         elif members[interface] and (

@@ -146,3 +146,67 @@ async def test_missing_or_malformed_wan_data_does_not_send_fabricated_counters(
     with pytest.raises(RouterOSError, match="required-wan-data-missing"):
         await source.collect(100, "02:00:00:00:00:99")
     assert source.last_summary["status"] == "unavailable"
+
+
+async def test_gateway_with_matching_port_map_reports_ports_and_two_wans(routeros_peer):
+    peer = await routeros_peer()
+    mapping = peer.directory / "gateway-map.json"
+    mapping.write_text(
+        json.dumps(
+            {
+                "profile": "rb5009-gateway-experimental",
+                "ports": [
+                    {"port_idx": 1, "interface": "ether1", "is_uplink": True},
+                    {"port_idx": 2, "interface": "ether2"},
+                    {"port_idx": 9, "interface": "sfp1"},
+                ],
+            }
+        )
+    )
+    settings = peer.settings(
+        profile="rb5009-gateway-experimental",
+        routeros_wan_interface="ether1",
+        routeros_wan2_interface="ether2",
+        device_model="UXGPRO",
+    ).model_copy(update={"routeros_map_file": mapping})
+    body = await RouterOSSource(settings).collect(1, "02:00:00:00:00:10")
+    assert [p["port_idx"] for p in body["port_table"]] == list(range(1, 10))
+    assert body["port_table"][0]["up"] and not body["port_table"][8]["up"]
+    assert [i["name"] for i in body["if_table"]] == ["eth0", "eth2"]
+    assert [c["name"] for c in body["config_port_table"]] == ["wan", "wan2"]
+    assert settings.model_code == "UXGPRO"
+
+
+async def test_gateway_ifname_map_exports_every_port_in_if_table(routeros_peer):
+    peer = await routeros_peer()
+    mapping = peer.directory / "ifname-map.json"
+    mapping.write_text(
+        json.dumps(
+            {
+                "profile": "rb5009-gateway-experimental",
+                "ports": [
+                    {"port_idx": 1, "interface": "ether1", "ifname": "eth8"},
+                    {"port_idx": 2, "interface": "ether2", "ifname": "eth0"},
+                    {"port_idx": 3, "interface": "ether3", "ifname": "eth1"},
+                    {"port_idx": 9, "interface": "sfp1", "ifname": "eth2"},
+                ],
+            }
+        )
+    )
+    settings = peer.settings(
+        profile="rb5009-gateway-experimental",
+        routeros_wan_interface="ether1",
+        routeros_wan2_interface="ether2",
+    ).model_copy(update={"routeros_map_file": mapping})
+    body = await RouterOSSource(settings).collect(1, "02:00:00:00:00:10")
+    assert "port_table" not in body and body["uplink"] == "eth8"
+    assert [i["name"] for i in body["if_table"]] == ["eth0", "eth1", "eth2", "eth8"]
+    assert body["config_port_table"] == [
+        {"ifname": "eth0", "name": "wan2", "type": "wan"},
+        {"ifname": "eth1", "name": "lan", "type": "lan"},
+        {"ifname": "eth2", "name": "lan2", "type": "lan"},
+        {"ifname": "eth8", "name": "wan", "type": "wan"},
+    ]
+    eth8 = body["if_table"][3]
+    assert eth8["up"] and eth8["mac"] == "02:00:00:00:00:18"
+    assert settings.model_code == "UGWXG"

@@ -111,3 +111,15 @@ def test_invalid_intervals(tmp_path, interval):
         apply_response(Store(tmp_path).load_or_create(), {"_type": "noop", "interval": interval})
         is None
     )
+
+
+def test_configured_mac_identity_is_explicit_and_bound(tmp_path):
+    store = Store(tmp_path)
+    with store.lock():
+        state = store.load_or_create("00:00:5E:00:53:10")
+    assert (state.mac, state.mac_source) == ("00:00:5e:00:53:10", "configured")
+    assert store.load_or_create("00:00:5e:00:53:10") == state
+    with pytest.raises(ValueError, match="Configured MAC differs"):
+        store.load_or_create("00:00:5e:00:53:11")
+    with pytest.raises(ValidationError):
+        type(state)(mac="00:00:5e:00:53:10")  # A physical MAC is never a synthetic identity.

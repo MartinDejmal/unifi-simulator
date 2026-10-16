@@ -1,0 +1,70 @@
+# RB5009 (RouterOS 7.24+) as a UniFi switch: USW Flex 2.5G 8 PoE (USWED37), ports 1-8 =
+# ether1-8, port 10 (SFP+ half of the 9/10 combo) = sfp-sfpplus1. No gateway: an adopted USG
+# would pin UniFi Network to 10.6. The gateway variant is kept in compose.rb5009-gateway.yml.
+# All site values (addresses, account, MACs) live in .env.rb5009, which is never committed.
+# docker compose -f compose.rb5009.yml --env-file .env.rb5009 up -d --build
+# Password lives in .secrets/rb5009-password (chmod 644 in a 700 dir), never in .env or here.
+services:
+  rb5009:
+    build: .
+    container_name: mtunifi-rb5009
+    environment:
+      MTUNIFI_INFORM_URL: ${MTUNIFI_INFORM_URL:?Set the controller /inform URL}
+      # IPv4 shown in UniFi; defaults to the RouterOS address.
+      MTUNIFI_DEVICE_IP: ${MTUNIFI_RB5009_IP:-${MTUNIFI_RB5009_HOST}}
+      MTUNIFI_HOSTNAME: ${MTUNIFI_RB5009_HOSTNAME:-mtunifi-rb5009}
+      MTUNIFI_HOSTNAME_FROM_IDENTITY: "true"
+      MTUNIFI_PROFILE: rb5009-switch-experimental
+      # Same layout as USWED36 plus PoE.
+      MTUNIFI_DEVICE_MODEL: ${MTUNIFI_RB5009_MODEL:-USWED37}
+      # Device identity = RouterOS ether1 MAC (its LLDP chassis ID); "auto" reads it once.
+      MTUNIFI_DEVICE_MAC: ${MTUNIFI_RB5009_MAC:-auto}
+      MTUNIFI_ROUTEROS_NEIGHBORS_RELAXED: "true"
+      # Report uplink "eth0" + if_table like real UniFi switches (controller builds uplink).
+      MTUNIFI_REPORT_UPLINK: "true"
+      # Show RouterOS bonds as a LAG in UniFi; display only.
+      MTUNIFI_REPORT_LAG: "true"
+      # Read PoE-out state per RJ45 port (read-only /interface/ethernet/poe/monitor).
+      MTUNIFI_ROUTEROS_POE: "true"
+      # Total PoE-out budget in W (check the router's datasheet).
+      MTUNIFI_POE_BUDGET_W: ${MTUNIFI_RB5009_POE_BUDGET_W:-}
+      # The ISP gateway from ARP on ether1 becomes the visible parent of the uplink port.
+      MTUNIFI_ROUTEROS_UPLINK_FROM_ARP: "true"
+      # Derived (not received) LLDP entry for that gateway on ether1, so the controller does
+      # not hang this router under a switch that sees a bond member on a non-uplink port.
+      MTUNIFI_ROUTEROS_UPLINK_LLDP_FROM_ARP: "true"
+      # Optional "real=reported" rewrites when a neighbor answers from a port MAC.
+      MTUNIFI_ROUTEROS_NEIGHBOR_MAC_ALIASES: ${MTUNIFI_RB5009_NEIGHBOR_ALIASES:-}
+      MTUNIFI_TELEMETRY_SOURCE: routeros
+      MTUNIFI_ROUTEROS_HOST: ${MTUNIFI_RB5009_HOST:?Set the RouterOS address}
+      MTUNIFI_ROUTEROS_PORT: 8728
+      # Plaintext API on the LAN by explicit choice; no TLS fallback exists.
+      MTUNIFI_ROUTEROS_TLS: "false"
+      MTUNIFI_ROUTEROS_USER: ${MTUNIFI_RB5009_USER:?Set the read-only API user}
+      MTUNIFI_ROUTEROS_PASSWORD_FILE: /run/secrets/rb5009_password
+      # Port map for this model; "auto" maps the RouterOS ports in order instead.
+      MTUNIFI_ROUTEROS_MAP_FILE: ${MTUNIFI_RB5009_MAP:-/scenarios/routeros-rb5009-switch.json}
+      MTUNIFI_ROUTEROS_POLL_INTERVAL: ${MTUNIFI_RB5009_POLL_INTERVAL:-15}
+      MTUNIFI_ROUTEROS_TIMEOUT: ${MTUNIFI_RB5009_TIMEOUT:-20}
+    volumes:
+      - rb5009-switch-state:/state   # holds the adoption private key; do not back up publicly
+      - ./examples:/scenarios:ro
+    secrets:
+      - rb5009_password
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  rb5009-switch-state:
+    name: ${MTUNIFI_RB5009_STATE_VOLUME:-unifi-sim_rb5009-switch-state}
+
+secrets:
+  rb5009_password:
+    file: ./.secrets/rb5009-password

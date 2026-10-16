@@ -313,3 +313,155 @@ async def test_unavailable_or_old_routeros_data_makes_health_fail(
     assert main() == 0
     report = json.loads(capsys.readouterr().out)
     assert report["routeros_telemetry"] is None and report["wired_clients"] is None
+
+
+async def test_wireless_interface_can_be_mapped_as_a_slot(routeros_peer):
+    peer = await routeros_peer()
+    original = peer.tables
+
+    def tables():
+        result = original()
+        result["/interface/print"].append(
+            {
+                ".id": "*9",
+                "name": "wlan1",
+                "type": "wlan",
+                "disabled": "false",
+                "running": "true",
+                "rx-byte": "10",
+                "tx-byte": "20",
+            }
+        )
+        return result
+
+    peer.tables = tables
+    mapping = peer.directory / "wlan-map.json"
+    mapping.write_text(
+        json.dumps(
+            {
+                "ports": [
+                    {"port_idx": 1, "interface": "ether1"},
+                    {"port_idx": 2, "interface": "wlan1", "assumed_speed_mbps": 300},
+                ]
+            }
+        )
+    )
+    settings = peer.settings().model_copy(update={"routeros_map_file": mapping})
+    body = await RouterOSSource(settings).collect(1, "")
+    wlan = next(p for p in body["port_table"] if p["name"] == "wlan1")
+    assert (wlan["port_idx"], wlan["up"], wlan["rx_bytes"]) == (2, True, 10)
+    assert (wlan["speed"], wlan["full_duplex"]) == (300, True)
+
+
+async def test_hostname_can_follow_routeros_identity(routeros_peer):
+    peer = await routeros_peer()
+    settings = peer.settings()
+    assert "hostname" not in await RouterOSSource(settings).collect(1, "")
+    named = settings.model_copy(update={"hostname_from_identity": True})
+    body = await RouterOSSource(named).collect(1, "")
+    assert body["hostname"] == "read-only-lab"
+
+
+async def test_routeros7_bond_type_is_recognised_as_bonding(routeros_peer):
+    peer = await routeros_peer()
+    original = peer.tables
+
+    def tables():
+        result = original()
+        for row in result["/interface/print"]:
+            if row["name"] == "bond1":
+                row["type"] = "bond"  # RouterOS 7 spelling
+        return result
+
+    peer.tables = tables
+    source = RouterOSSource(peer.settings())
+    await source.collect(1, "")
+    kinds = {
+        i["name"]: i["kind"] for i in source.last_summary["observations"]["logical_interfaces"]
+    }
+    assert kinds["bond1"] == "bonding"
+
+
+async def test_switch_can_report_management_uplink_interface(routeros_peer):
+    peer = await routeros_peer()
+    plain = await RouterOSSource(peer.settings()).collect(1, "02:00:00:00:00:21")
+    assert "uplink" not in plain and "if_table" not in plain
+    settings = peer.settings(report_uplink=True, device_ip="192.0.2.30")
+    body = await RouterOSSource(settings).collect(1, "02:00:00:00:00:21")
+    (eth0,) = body["if_table"]
+    assert body["uplink"] == "eth0" and eth0["name"] == "eth0"
+    assert eth0["mac"] == "02:00:00:00:00:21" and eth0["ip"] == "192.0.2.30"
+
+
+async def test_uplink_arp_neighbor_is_listed_on_the_uplink_port(routeros_peer):
+    peer = await routeros_peer()
+    original = peer.tables
+    gateway = "00:0a:0b:0c:0d:0e"
+
+    def tables(extra=()):
+        result = original()
+        result["/ip/arp/print"].extend(extra)
+        return result
+
+    peer.tables = lambda: tables(
+        [{"address": "198.51.100.1", "mac-address": gateway, "interface": "ether1"}]
+    )
+    plain = await RouterOSSource(peer.settings()).collect(1, "")
+    assert all(e["mac"] != gateway for e in plain["port_table"][0]["mac_table"])
+    source = RouterOSSource(peer.settings(routeros_uplink_from_arp=True))
+    body = await source.collect(1, "")
+    assert gateway in [e["mac"] for e in body["port_table"][0]["mac_table"]]
+    assert all(n["chassis_id"] != gateway for n in body["lldp_table"])
+    derived = RouterOSSource(
+        peer.settings(routeros_uplink_from_arp=True, routeros_uplink_lldp_from_arp=True)
+    )
+    (entry,) = [n for n in (await derived.collect(1, ""))["lldp_table"] if n["port_id"] == "wan"]
+    assert entry["chassis_id"] == gateway and entry["local_port_idx"] == 1
+    peer.tables = lambda: tables(
+        [
+            {"address": "198.51.100.1", "mac-address": gateway, "interface": "ether1"},
+            {"address": "198.51.100.2", "mac-address": "00:0a:0b:0c:0d:0f", "interface": "ether1"},
+        ]
+    )
+    source = RouterOSSource(peer.settings(routeros_uplink_from_arp=True))
+    body = await source.collect(1, "")
+    assert gateway not in [e["mac"] for e in body["port_table"][0]["mac_table"]]
+    assert "uplink-arp:ambiguous" in source.last_summary["observations"]["warnings"]
+
+
+def test_poe_totals_sum_only_powered_ports():
+    from dataclasses import replace
+
+    from mtunifi.routeros import poe_totals
+    from mtunifi.snapshot import DeviceHealth, DeviceSnapshot, PhysicalPort, PortPoE
+
+    port = PhysicalPort(1, "ether1", None, None, True, True, 1000, True, True, 0, 0)
+    ports = (
+        replace(port, poe=PortPoE("auto-on", "powered-on", 48.6, 157.0, 7.6)),
+        replace(
+            port, port_idx=2, name="ether2", poe=PortPoE("auto-on", "powered-on", 48.6, 31, 1.5)
+        ),
+        replace(port, port_idx=3, name="ether3", poe=PortPoE("auto-on", "waiting-for-load")),
+    )
+    totals = poe_totals(DeviceSnapshot(DeviceHealth("7.24.5", 1), ports), 130)
+    assert totals == {
+        "total_max_power": 130,
+        "total_max_effective_power": 130,
+        "total_used_power": 9.1,
+    }
+
+
+async def test_device_mac_and_port_map_can_be_discovered_from_routeros(routeros_peer):
+    from pathlib import Path
+
+    from mtunifi.routeros import discover_device_mac
+
+    peer = await routeros_peer()
+    assert await discover_device_mac(peer.settings()) == "dc:2c:6e:00:00:01"
+    settings = peer.settings().model_copy(update={"routeros_map_file": Path("auto")})
+    source = RouterOSSource(settings)
+    body = await source.collect(1, "")
+    names = [p.get("name") for p in body["port_table"]]
+    assert names[:6] == ["ether1", "ether2", "ether3", "ether4", "ether5", "sfp1"]
+    assert body["port_table"][0]["is_uplink"] and not body["port_table"][1]["is_uplink"]
+    assert source.last_summary["mapped_physical_ports"] == 6

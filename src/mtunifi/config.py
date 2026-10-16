@@ -1,5 +1,6 @@
 import ipaddress
 import os
+import re
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -16,6 +17,27 @@ class Settings(BaseModel):
     device_ip: str = "192.0.2.10"
     hostname: str = Field(default="mtunifi-lab", pattern=r"^[A-Za-z0-9-]{1,63}$")
     profile: str = "us8-experimental"
+    # Report the RouterOS identity (when it is a valid hostname) instead of `hostname`.
+    hostname_from_identity: bool = False
+    # Switches: also report the management interface (uplink "eth0" + if_table), as real
+    # UniFi switches do, so the controller can build this device's own uplink.
+    report_uplink: bool = False
+    # Mark ports bonded in RouterOS as a UniFi LAG (display only; nothing is configured).
+    report_lag: bool = False
+    # Read PoE-out state of RJ45 ports (/interface/ethernet/poe/monitor, read-only).
+    routeros_poe: bool = False
+    # Total PoE-out budget reported to the controller (W); usage is summed from the ports.
+    poe_budget_w: float | None = Field(default=None, gt=0, le=10000)
+    # Optional UniFi model code overriding the profile's (e.g. to try another gateway model).
+    device_model: str | None = Field(default=None, pattern=r"^[A-Za-z0-9]{2,16}$")
+    # Optional firmware version reported to the controller (e.g. its current release for
+    # the model, so it stops offering an upgrade); defaults to the profile's version.
+    device_version: str | None = Field(default=None, pattern=r"^\d{1,4}(\.\d{1,8}){1,4}$")
+    # Optional explicit device MAC (e.g. the RouterOS LLDP chassis MAC) instead of a synthetic
+    # one; "auto" reads the RouterOS ether1 MAC once, when the identity is first created.
+    device_mac: str | None = Field(
+        default=None, pattern=r"^(auto|([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})$"
+    )
     packet_version: int = Field(default=1, ge=0, le=1)
     encryption: str = "cbc"
     interval: float = Field(default=10, ge=1, le=300)
@@ -29,15 +51,27 @@ class Settings(BaseModel):
     routeros_user: str | None = Field(default=None, min_length=1, max_length=128, repr=False)
     routeros_password_file: Path | None = None
     routeros_ca_file: Path | None = None
+    # Port map JSON, or "auto" to map the RouterOS ports in order (ether, sfp, wlan).
     routeros_map_file: Path | None = None
     routeros_timeout: float = Field(default=10, ge=1, le=120)
     routeros_poll_interval: float = Field(default=10, ge=5, le=300)
     routeros_wan_interface: str = Field(default="ether1", min_length=1, max_length=128)
+    # Optional second WAN (e.g. a backup line); exported as the gateway's wan2 (eth2).
+    routeros_wan2_interface: str | None = Field(default=None, min_length=1, max_length=128)
+    # Also export MNDP/CDP and merged-protocol neighbors, and LLDP seen on bond members.
+    routeros_neighbors_relaxed: bool = False
+    # List the single ARP neighbor on the uplink port (e.g. ISP gateway) as the parent.
+    routeros_uplink_from_arp: bool = False
+    # Also announce that gateway as a derived (not received) LLDP neighbor on the uplink port.
+    routeros_uplink_lldp_from_arp: bool = False
+    # Neighbor MAC rewrites "real=reported,..." (e.g. another emulated MikroTik's port MAC
+    # to that emulator's device MAC) so both ends of a link name the same chassis.
+    routeros_neighbor_mac_aliases: str | None = Field(default=None, max_length=1024)
 
-    @field_validator("routeros_wan_interface")
+    @field_validator("routeros_wan_interface", "routeros_wan2_interface")
     @classmethod
     def interface_name(cls, value):
-        if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        if value is not None and any(ord(c) < 32 or ord(c) == 127 for c in value):
             raise ValueError("Control characters are not allowed")
         return value
 
@@ -46,6 +80,12 @@ class Settings(BaseModel):
         "routeros_password_file",
         "routeros_ca_file",
         "routeros_map_file",
+        "routeros_wan2_interface",
+        "device_model",
+        "device_version",
+        "device_mac",
+        "poe_budget_w",
+        "routeros_neighbor_mac_aliases",
         mode="before",
     )
     @classmethod
@@ -77,6 +117,33 @@ class Settings(BaseModel):
         if value is not None and any(ord(c) < 32 or ord(c) == 127 for c in value):
             raise ValueError("Control characters are not allowed")
         return value
+
+    @field_validator("device_mac")
+    @classmethod
+    def unicast_mac(cls, value):
+        if value == "auto":
+            return value
+        if value is not None and int(value[:2], 16) & 1:
+            raise ValueError("Device MAC must be unicast")
+        return value.lower() if value else value
+
+    @property
+    def neighbor_mac_aliases(self) -> dict[str, str]:
+        result = {}
+        for pair in (self.routeros_neighbor_mac_aliases or "").split(","):
+            if not pair.strip():
+                continue
+            real, _, reported = pair.partition("=")
+            pattern = r"([0-9a-f]{2}:){5}[0-9a-f]{2}"
+            real, reported = real.strip().lower(), reported.strip().lower()
+            if not re.fullmatch(pattern, real) or not re.fullmatch(pattern, reported):
+                raise ValueError("Neighbor MAC aliases must be real=reported MAC pairs")
+            result[real] = reported
+        return result
+
+    @property
+    def model_code(self) -> str:
+        return self.device_model or profile(self.profile).model
 
     @model_validator(mode="after")
     def source_settings(self):
