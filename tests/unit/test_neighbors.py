@@ -5,10 +5,12 @@ import pytest
 from mtunifi.neighbors import collect_neighbors
 from mtunifi.snapshot import (
     BridgeMember,
+    ClientInventory,
     DeviceHealth,
     DeviceSnapshot,
     LogicalInterface,
     PhysicalPort,
+    PortPoE,
     unifi_snapshot,
 )
 
@@ -131,3 +133,64 @@ def test_missing_description_and_age_not_invented():
     snapshot = scene([row(identity="", age="bad")])
     assert snapshot.neighbors.observations[0].age_seconds is None
     assert "chassis_descr" not in unifi_snapshot(snapshot)["lldp_table"][0]
+
+
+def test_relaxed_mode_exports_mndp_merged_and_bond_member_neighbors_with_aliases():
+    rows = [
+        row(**{"discovered-by": "cdp,mndp"}),
+        row(interface="bond,br,ether1", **{"mac-address": B, "interface-name": "Port 9"}),
+    ]
+    strict = scene(rows)
+    assert {n.export_reason for n in strict.neighbors.observations} == {
+        "protocol-not-lldp",
+        "unresolved-local-interface",
+    }
+    relaxed = scene(rows, relaxed=True, mac_aliases={A: "00:00:5e:00:53:10"})
+    assert {(n.port_idx, n.mac, n.export_reason) for n in relaxed.neighbors.observations} == {
+        (2, "00:00:5e:00:53:10", "eligible"),
+        (1, B, "eligible"),
+    }
+    assert len(unifi_snapshot(relaxed)["lldp_table"]) == 2
+
+
+def test_relaxed_neighbor_macs_fill_mac_table_once_for_downlinks():
+    rows = [
+        row(**{"discovered-by": "cdp,mndp"}),
+        row(interface="bond,br,ether1", **{"mac-address": B, "interface-name": "Port 9"}),
+    ]
+    snapshot = scene(rows, relaxed=True)
+    snapshot = replace(snapshot, wired=ClientInventory((), {"fdb": "available"}))
+    ports = {p["port_idx"]: p for p in unifi_snapshot(snapshot, neighbor_macs=True)["port_table"]}
+    assert [e["mac"] for e in ports[1]["mac_table"]] == [B]
+    assert [e["mac"] for e in ports[2]["mac_table"]] == [A]
+    plain = {p["port_idx"]: p for p in unifi_snapshot(snapshot)["port_table"]}
+    assert plain[1]["mac_table"] == [] and plain[2]["mac_table"] == []
+    uplinked = replace(
+        snapshot,
+        ports=tuple(replace(p, is_uplink=p.port_idx == 2) for p in snapshot.ports),
+    )
+    ports = {p["port_idx"]: p for p in unifi_snapshot(uplinked, neighbor_macs=True)["port_table"]}
+    assert ports[2]["mac_table"] == []  # the uplink neighbor is the parent
+
+
+def test_bond_members_are_reported_as_a_lag_led_by_the_lowest_port():
+    snapshot = replace(
+        scene([]),
+        logical_interfaces=(LogicalInterface("bond", "bonding", members=("ether2", "ether1")),),
+    )
+    ports = {p["port_idx"]: p for p in unifi_snapshot(snapshot, report_lag=True)["port_table"]}
+    assert ports[1]["op_mode"] == "aggregate" and ports[1]["aggregate_members"] == [1, 2]
+    assert ports[2]["aggregated_by"] == 1 and ports[2]["lag_idx"] == ports[1]["lag_idx"] == 1
+    assert "op_mode" not in unifi_snapshot(snapshot)["port_table"][0]
+
+
+def test_poe_state_is_reported_like_a_unifi_poe_switch():
+    snapshot = scene([])
+    ports = list(snapshot.ports)
+    ports[0] = replace(ports[0], poe=PortPoE("auto-on", "powered-on", 48.6, 157.0, 7.6))
+    ports[1] = replace(ports[1], poe=PortPoE("off", "disabled"))
+    table = unifi_snapshot(replace(snapshot, ports=tuple(ports)))["port_table"]
+    assert table[0]["poe_enable"] and table[0]["poe_power"] == "7.60"
+    assert table[0]["poe_current"] == "157.00" and table[0]["poe_mode"] == "auto"
+    assert table[1]["poe_mode"] == "off" and table[1]["poe_power"] == "0.00"
+    assert "port_poe" not in table[2]

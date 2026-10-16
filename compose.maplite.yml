@@ -1,0 +1,58 @@
+# mAP lite (RouterOS 7.24+) as a UniFi switch. Read-only RouterOS API, own state volume.
+# All site values (addresses, account, MACs) live in .env.maplite, which is never committed.
+# Standalone: docker compose -f compose.maplite.yml --env-file .env.maplite up -d --build
+# Password lives in .secrets/maplite-password (chmod 644 in a 700 dir), never in .env or here.
+services:
+  maplite:
+    build: .
+    container_name: mtunifi-maplite
+    environment:
+      MTUNIFI_INFORM_URL: ${MTUNIFI_INFORM_URL:?Set the controller /inform URL}
+      MTUNIFI_DEVICE_IP: ${MTUNIFI_MAPLITE_IP:?Set the IPv4 address shown for the device in UniFi}
+      MTUNIFI_HOSTNAME: ${MTUNIFI_MAPLITE_HOSTNAME:-mtunifi-maplite}
+      MTUNIFI_PROFILE: maplite-experimental
+      # Optional: the controller's current US8 firmware, so it stops offering an upgrade.
+      MTUNIFI_DEVICE_VERSION: ${MTUNIFI_MAPLITE_VERSION:-}
+      # The RouterOS ether1 MAC (what the upstream router sees) instead of a synthetic one.
+      MTUNIFI_DEVICE_MAC: ${MTUNIFI_MAPLITE_MAC:?Set the RouterOS ether1 MAC}
+      MTUNIFI_ROUTEROS_NEIGHBORS_RELAXED: "true"
+      # Report uplink "eth0" + if_table like real UniFi switches (controller builds uplink).
+      MTUNIFI_REPORT_UPLINK: "true"
+      # Optional "real=reported" rewrites, e.g. the upstream router's port MAC to the MAC
+      # its emulator uses as device identity.
+      MTUNIFI_ROUTEROS_NEIGHBOR_MAC_ALIASES: ${MTUNIFI_MAPLITE_NEIGHBOR_ALIASES:-}
+      # UniFi name = RouterOS identity; MTUNIFI_HOSTNAME is the fallback.
+      MTUNIFI_HOSTNAME_FROM_IDENTITY: "true"
+      MTUNIFI_TELEMETRY_SOURCE: routeros
+      MTUNIFI_ROUTEROS_HOST: ${MTUNIFI_MAPLITE_HOST:?Set the RouterOS address}
+      MTUNIFI_ROUTEROS_PORT: 8728
+      # Plaintext API on the LAN by explicit choice; no TLS fallback exists.
+      MTUNIFI_ROUTEROS_TLS: "false"
+      MTUNIFI_ROUTEROS_USER: ${MTUNIFI_MAPLITE_USER:?Set the read-only API user}
+      MTUNIFI_ROUTEROS_PASSWORD_FILE: /run/secrets/maplite_password
+      MTUNIFI_ROUTEROS_MAP_FILE: /scenarios/routeros-maplite.json
+      # Small device (little free RAM, busy CPU): poll rarely.
+      MTUNIFI_ROUTEROS_POLL_INTERVAL: ${MTUNIFI_MAPLITE_POLL_INTERVAL:-30}
+      MTUNIFI_ROUTEROS_TIMEOUT: ${MTUNIFI_MAPLITE_TIMEOUT:-20}
+    volumes:
+      - maplite-state:/state   # holds the adoption private key; do not back up publicly
+      - ./examples:/scenarios:ro
+    secrets:
+      - maplite_password
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  maplite-state:
+    name: ${MTUNIFI_MAPLITE_STATE_VOLUME:-unifi-sim_maplite-state}
+
+secrets:
+  maplite_password:
+    file: ./.secrets/maplite-password

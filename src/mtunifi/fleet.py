@@ -12,7 +12,6 @@ from typing import Literal
 from pydantic import Field, ValidationError, model_validator
 
 from mtunifi.config import Settings
-from mtunifi.profiles import profile
 from mtunifi.scenario import LabModel
 from mtunifi.storage import Store
 
@@ -295,7 +294,7 @@ def fleet_command(path: Path, command: str, device_id: str | None, once: bool) -
                         {
                             "id": d.id,
                             "profile": d.settings.profile,
-                            "model": profile(d.settings.profile).model,
+                            "model": d.settings.model_code,
                         }
                         for d in devices
                     ],

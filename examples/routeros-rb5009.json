@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "profile": "rb5009-gateway-experimental",
+  "ports": [
+    {"port_idx": 1, "interface": "ether1", "ifname": "eth0", "is_uplink": true},
+    {"port_idx": 2, "interface": "ether2", "ifname": "eth1"},
+    {"port_idx": 3, "interface": "ether3", "ifname": "eth2"},
+    {"port_idx": 4, "interface": "ether4", "ifname": "eth3"},
+    {"port_idx": 5, "interface": "ether5", "ifname": "eth4"},
+    {"port_idx": 6, "interface": "ether6", "ifname": "eth5"},
+    {"port_idx": 7, "interface": "ether7", "ifname": "eth6"},
+    {"port_idx": 8, "interface": "ether8", "ifname": "eth7"},
+    {"port_idx": 9, "interface": "sfp-sfpplus1", "ifname": "eth8"}
+  ]
+}

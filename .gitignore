@@ -11,3 +11,10 @@ dist/
 *.pcap
 *.pcapng
 examples/local/
+.env.maplite
+.env.rb5009
+*.yml.bak
+.DS_Store
+.env.*
+!.env.*.example
+*.bak

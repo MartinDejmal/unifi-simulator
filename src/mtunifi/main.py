@@ -137,7 +137,7 @@ def main() -> int:
                     | {
                         "controller": settings.inform_url,
                         "selected_profile": settings.profile,
-                        "model": profile(settings.profile).model,
+                        "model": settings.model_code,
                         "wan_interface": settings.routeros_wan_interface
                         if profile(settings.profile).kind == "gateway"
                         else None,
@@ -167,7 +167,7 @@ def main() -> int:
             raise ValueError("Use probe-routeros for observed telemetry")
         source = create_source(settings) if args.command != "init" else None
         with store.lock():
-            state = store.load_or_create()
+            state = store.load_or_create(settings.device_mac)
             state.bind(
                 settings.profile,
                 settings.routeros_host if settings.telemetry_source == "routeros" else None,

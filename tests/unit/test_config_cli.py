@@ -68,3 +68,11 @@ def test_invalid_initial_scenario_does_not_create_identity_or_echo_values(
     assert json.loads(output)["reason"] == "Invalid synthetic scenario"
     assert {"path": "<unknown>", "error": "extra_forbidden"} in json.loads(output)["issues"]
     assert not (tmp_path / "unused").exists()
+
+
+def test_device_version_override_is_validated():
+    from mtunifi.config import Settings
+
+    assert Settings(device_version="7.5.15.1234").device_version == "7.5.15.1234"
+    with pytest.raises(ValueError):
+        Settings(device_version="7.5; rm")

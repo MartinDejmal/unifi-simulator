@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "profile": "rb5009-switch-experimental",
+  "ports": [
+    {"port_idx": 1, "interface": "ether1", "is_uplink": true},
+    {"port_idx": 2, "interface": "ether2"},
+    {"port_idx": 3, "interface": "ether3"},
+    {"port_idx": 4, "interface": "ether4"},
+    {"port_idx": 5, "interface": "ether5"},
+    {"port_idx": 6, "interface": "ether6"},
+    {"port_idx": 7, "interface": "ether7"},
+    {"port_idx": 8, "interface": "ether8"},
+    {"port_idx": 10, "interface": "sfp-sfpplus1"}
+  ]
+}

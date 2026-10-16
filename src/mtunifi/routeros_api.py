@@ -133,6 +133,7 @@ PROPERTIES = {
     Table.IP_ADDRESSES: "address,interface,actual-interface,disabled,invalid,dynamic",
 }
 MONITOR = "/interface/ethernet/monitor"
+POE_MONITOR = "/interface/ethernet/poe/monitor"
 
 
 def length_prefix(size: int) -> bytes:
@@ -241,9 +242,17 @@ class RouterOSAPI:
             raise RouterOSError("invalid-interface-id")
         return await self._execute(MONITOR, ("=numbers=" + interface_id, "=once="))
 
+    async def poe_monitor(self, names: tuple[str, ...]) -> list[dict[str, str]]:
+        """Read-only PoE-out status (state, voltage, current, power) of the named ports."""
+        if not names or any(
+            not n or len(n) > 64 or "," in n or any(ord(c) < 32 for c in n) for n in names
+        ):
+            raise RouterOSError("invalid-interface-id")
+        return await self._execute(POE_MONITOR, ("=numbers=" + ",".join(names), "=once="))
+
     async def _execute(self, command: str, words: tuple[str, ...]) -> list[dict[str, str]]:
         # Defense in depth: even internal callers cannot send writes, scripts or arbitrary paths.
-        if command not in {"/login", MONITOR, *(t.value for t in Table)}:
+        if command not in {"/login", MONITOR, POE_MONITOR, *(t.value for t in Table)}:
             raise RouterOSError("command-not-allowed")
         self.stage = command  # Allowlisted path only; never retain argument words or passwords.
         if self.writer is None or self.reader is None:

@@ -28,6 +28,18 @@ class PhysicalPort:
     rx_bytes: int
     tx_bytes: int
     is_uplink: bool = False
+    poe: "PortPoE | None" = None
+
+
+@dataclass(frozen=True)
+class PortPoE:
+    """Observed RouterOS PoE-out state; unknown values stay None."""
+
+    mode: str | None  # poe-out: auto-on / forced-on / off
+    status: str | None  # poe-out-status, e.g. powered-on, waiting-for-load
+    voltage: float | None = None  # V
+    current_ma: float | None = None
+    power_w: float | None = None
 
 
 @dataclass(frozen=True)
@@ -147,13 +159,75 @@ class DeviceSnapshot:
     wired: ClientInventory | None = None
     neighbors: NeighborInventory | None = None
     wan: WANObservation | None = None
+    wan2: WANObservation | None = None
+    # Next hop seen in ARP on the uplink port (e.g. the ISP gateway), opt-in.
+    uplink_neighbor_mac: str | None = None
 
     def public(self) -> dict:
         return asdict(self)
 
 
-def unifi_snapshot(snapshot: DeviceSnapshot, *, age_seconds: int = 0, port_count: int = 8) -> dict:
+def poe_fields(poe: PortPoE) -> dict:
+    """PoE port fields as a UniFi PoE switch reports them (values as 2-decimal strings)."""
+    delivering = poe.status == "powered-on"
+
+    def reading(value: float | None) -> str:
+        return f"{value:.2f}" if delivering and value is not None else "0.00"
+
+    return {
+        "port_poe": True,
+        "poe_caps": 3,
+        "poe_mode": "off" if poe.mode == "off" else "auto",
+        "poe_enable": delivering,
+        "poe_good": delivering,
+        "poe_class": "Unknown",  # RouterOS does not report the PD class here
+        "poe_power": reading(poe.power_w),
+        "poe_voltage": reading(poe.voltage),
+        "poe_current": reading(poe.current_ma),
+    }
+
+
+def lag_fields(snapshot: DeviceSnapshot) -> dict[int, dict]:
+    """Port fields a UniFi switch reports for a LAG, from RouterOS bond membership.
+
+    Display only: the lowest mapped member leads the LAG, like a real switch reports it.
+    """
+    slots = {p.name: p for p in snapshot.ports}
+    result: dict[int, dict] = {}
+    bonds = [i for i in snapshot.logical_interfaces if i.kind == "bonding" and i.members]
+    for lag_idx, bond in enumerate(sorted(bonds, key=lambda b: b.name), 1):
+        members = sorted((slots[m] for m in bond.members if m in slots), key=lambda p: p.port_idx)
+        if len(members) < 2:
+            continue
+        lead = members[0].port_idx
+        result[lead] = {
+            "op_mode": "aggregate",
+            "aggregate_num_ports": len(members),
+            "aggregate_members": [p.port_idx for p in members],
+            "lacp_state": [
+                {"active": p.up, "member_port": p.port_idx, "speed": p.speed_mbps or 0}
+                for p in members
+            ],
+            "lag_member": True,
+            "lag_idx": lag_idx,
+            "aggregated_by": False,
+        }
+        for p in members[1:]:
+            result[p.port_idx] = {"lag_member": True, "aggregated_by": lead, "lag_idx": lag_idx}
+    return result
+
+
+def unifi_snapshot(
+    snapshot: DeviceSnapshot,
+    *,
+    age_seconds: int = 0,
+    port_count: int = 8,
+    neighbor_macs: bool = False,
+    uplink_lldp: bool = False,
+    report_lag: bool = False,
+) -> dict:
     by_slot = {port.port_idx: port for port in snapshot.ports}
+    lags = lag_fields(snapshot) if report_lag else {}
     clients_by_port: dict[int, list] = {i: [] for i in range(1, port_count + 1)}
     clients = snapshot.wired.clients if snapshot.wired is not None else None
     for client in clients or ():
@@ -173,6 +247,37 @@ def unifi_snapshot(snapshot: DeviceSnapshot, *, age_seconds: int = 0, port_count
         if client.hostname is not None:
             entry["hostname"] = client.hostname
         clients_by_port[client.port_idx].append(entry)
+    if neighbor_macs and clients is not None and snapshot.neighbors is not None:
+        # An exported neighbor is directly attached to its local port even when the FDB
+        # cannot show it (routed port, or learned on a bond): list it there so the
+        # controller can build the downlink. Bond members report it on the lowest port.
+        # Never on the uplink port: the neighbor there is the parent, not a downlink.
+        seen = {e["mac"] for entries in clients_by_port.values() for e in entries}
+        for n in sorted(snapshot.neighbors.observations or (), key=lambda n: n.port_idx or 0):
+            port = by_slot.get(n.port_idx)
+            if (
+                n.export_reason != "eligible"
+                or n.mac is None
+                or n.mac in seen
+                or port is None
+                or port.is_uplink
+                or not port.enabled
+                or not port.up
+            ):
+                continue
+            seen.add(n.mac)
+            clients_by_port[n.port_idx].append(
+                {"mac": n.mac, "age": max(0, age_seconds), "uptime": 0, "static": False}
+            )
+    upstream = snapshot.uplink_neighbor_mac
+    if upstream and clients is not None:
+        uplink = next((p for p in snapshot.ports if p.is_uplink and p.enabled and p.up), None)
+        listed = {e["mac"] for entries in clients_by_port.values() for e in entries}
+        if uplink is not None and upstream not in listed:
+            # The parent on the uplink port: lets the controller see this device's upstream.
+            clients_by_port[uplink.port_idx].append(
+                {"mac": upstream, "age": max(0, age_seconds), "uptime": 0, "static": False}
+            )
     ports = []
     for slot in range(1, port_count + 1):
         port = by_slot.get(slot)
@@ -184,6 +289,7 @@ def unifi_snapshot(snapshot: DeviceSnapshot, *, age_seconds: int = 0, port_count
             continue
         entry = {
             "port_idx": slot,
+            "name": port.name,
             "enable": port.enabled,
             "up": port.up,
             "is_uplink": port.is_uplink,
@@ -202,6 +308,9 @@ def unifi_snapshot(snapshot: DeviceSnapshot, *, age_seconds: int = 0, port_count
             entry["autoneg"] = port.autoneg
         if clients is not None:
             entry["mac_table"] = clients_by_port[slot]
+        entry |= lags.get(slot, {})
+        if port.poe is not None:
+            entry |= poe_fields(port.poe)
         ports.append(entry)
     health = snapshot.health
     stats = {}
@@ -238,4 +347,19 @@ def unifi_snapshot(snapshot: DeviceSnapshot, *, age_seconds: int = 0, port_count
             if neighbor.system_description or neighbor.identity:
                 entry["chassis_descr"] = neighbor.system_description or neighbor.identity
             body["lldp_table"].append(entry)
+    upstream = snapshot.uplink_neighbor_mac
+    uplink = next((p for p in snapshot.ports if p.is_uplink and p.enabled and p.up), None)
+    if uplink_lldp and upstream and uplink is not None and "lldp_table" in body:
+        # Derived from ARP, not a received LLDP frame: the ISP gateway sends no LLDP. It
+        # gives the controller an upstream on this device's own uplink port (opt-in).
+        body["lldp_table"].append(
+            {
+                "chassis_id": upstream,
+                "local_port_idx": uplink.port_idx,
+                "local_port_name": uplink.name,
+                "port_id": "wan",
+                "chassis_descr": "ISP gateway (derived from ARP)",
+                "is_wired": True,
+            }
+        )
     return body
