@@ -13,16 +13,32 @@ to the router. Settings changed in the UniFi UI are ignored for these devices.
 
 Tested with RouterOS 7.24.5 and UniFi Network 10.6.106 on UniFi OS Server 5.1.42.
 
-## What is read automatically
+## What is automatic and what is not
 
-At runtime, from RouterOS: port state, speed, duplex and counters; FDB clients with
-ARP/DHCP names; LLDP/MNDP/CDP neighbors; bond membership (shown as a UniFi LAG);
-PoE-out state, power, voltage and current per port; RouterOS identity (used as the
-device name); the ISP gateway seen in ARP on the uplink port.
+Read automatically from RouterOS, nothing to configure:
 
-What you configure once, per site, in a local `.env` file (never committed):
-controller URL, router address, API user, the device MAC and, if your network needs
-them, neighbor MAC rewrites. See [Settings](#settings).
+- port state, speed, duplex and counters; FDB clients with ARP/DHCP names;
+  LLDP/MNDP/CDP neighbors; bond membership (shown as a UniFi LAG); PoE-out state,
+  power, voltage and current per port; RouterOS identity (used as device name); the
+  ISP gateway seen in ARP on the uplink port;
+- the **device MAC** (`…_MAC=auto`, the default): the RouterOS ether1 MAC, read once
+  when the identity is created;
+- the **IP shown in UniFi**: defaults to the RouterOS address;
+- the **port map**, if you set `…_MAP=auto`: RouterOS ports in order (ether, sfp, other
+  Ethernet-type, wireless), ether1 as uplink.
+
+Still needs you, because it cannot be discovered or would need write access:
+
+| Item | Why it is manual | How |
+| --- | --- | --- |
+| Controller URL, router address, API user and password | The emulator must know where and how to connect before it can read anything | `scripts/setup-mikrotik.sh` asks for them |
+| Read-only API user on RouterOS | Creating it needs admin rights; the emulator never writes to the router | [step 1](#1-read-only-api-user-on-routeros) |
+| Adoption in UniFi | The controller requires an operator click | UniFi → Devices → Adopt |
+| PoE budget (`MTUNIFI_RB5009_POE_BUDGET_W`) | RouterOS does not report the total PoE-out budget | Take it from the router's datasheet; without it "PoE in use" is not shown |
+| Firmware version (`MTUNIFI_MAPLITE_VERSION`) | Only the controller knows its current firmware for the model | Copy `upgrade_to_firmware` from `scripts/unifi-topology.sh`; only to hide the update badge |
+| Neighbor MAC rewrites (`…_NEIGHBOR_ALIASES`) | Needed only when a neighbor answers from a port MAC that differs from the MAC UniFi knows; this depends on the neighbor | Compare both sides in `scripts/unifi-topology.sh`, see [Topology notes](#topology-notes) |
+| Port map for other MikroTik models | The ready-made maps place ports to match the UniFi faceplate (e.g. SFP+ on the combo slot, an assumed wlan speed) | Use `…_MAP=auto`, or copy and edit `examples/routeros-*.json` |
+| Device names and port names in UniFi | Stored by the controller, not taken from the device | Rename in the UniFi UI |
 
 ## 1. Read-only API user on RouterOS
 
@@ -37,36 +53,37 @@ address of the host that runs Docker:
 
 The account needs no `write`, `policy`, `sensitive`, `ssh` or `ftp` rights.
 
-## 2. Clone and create the password files
+## 2. Clone and run the setup script
 
 ```bash
 git clone -b moje https://github.com/joazif/unifi-simulator.git ~/docker/unifi-sim
-cd ~/docker/unifi-sim && mkdir -p .secrets && chmod 700 .secrets
-read -rsp "RB5009 API password: " P && echo && (umask 022; printf "%s" "$P" > .secrets/rb5009-password) && unset P
-read -rsp "mAP lite API password: " P && echo && (umask 022; printf "%s" "$P" > .secrets/maplite-password) && unset P
+cd ~/docker/unifi-sim
+scripts/setup-mikrotik.sh rb5009
+scripts/setup-mikrotik.sh maplite
 ```
 
-The container runs as UID 10001, so the files must be readable by others (`644`);
-the `700` directory keeps other local users out. A `600` file fails with
-`password-file-invalid`.
+The script asks for the controller inform URL, router address, API user and password,
+writes `.env.<device>` (mode `600`, never committed) and `.secrets/<device>-password`,
+then builds the image and probes the router read-only, listing the ports it found.
+Optional values can be added to the `.env` file afterwards (see
+[Settings](#settings) and `.env.*.example`).
 
-## 3. Fill in the `.env` files
+## 3. Manual setup (alternative)
 
 ```bash
-cp .env.rb5009.example .env.rb5009
-cp .env.maplite.example .env.maplite
-chmod 600 .env.rb5009 .env.maplite
+mkdir -p .secrets && chmod 700 .secrets
+read -rsp "RB5009 API password: " P && echo && (umask 022; printf "%s" "$P" > .secrets/rb5009-password) && unset P
+cp .env.rb5009.example .env.rb5009 && chmod 600 .env.rb5009
 ```
 
-Edit both files. The device MAC must be the router's **ether1 MAC**; RouterOS uses it
-as its LLDP chassis ID, so other UniFi devices name their uplink with it:
+Fill in the three required values in `.env.rb5009`; leave the optional ones empty for
+the automatic defaults. The container runs as UID 10001, so the password file must be
+readable by others (`644`); the `700` directory keeps other local users out. A `600`
+file fails with `password-file-invalid`.
 
-```
-/interface ethernet print where name=ether1
-```
-
-The MAC is the device identity in UniFi. Set it before the first start and do not
-change it afterwards (a different MAC is a new device and needs a new adoption).
+The device MAC is the identity in UniFi. With `auto` it is read once at the first
+start and kept in the state volume; set it explicitly only to reuse an existing
+identity. A different MAC is a new device and needs a new adoption.
 
 ## 4. Check, probe and start
 
@@ -95,9 +112,10 @@ Set in `.env.rb5009` / `.env.maplite` (the prefixes are `MTUNIFI_RB5009_*` and
 | Variable | Meaning |
 | --- | --- |
 | `MTUNIFI_INFORM_URL` | Controller inform URL, e.g. `http://<controller>:8080/inform` |
-| `…_IP` | IPv4 shown for the device in UniFi (usually the router's LAN IP) |
-| `…_HOST`, `…_USER` | RouterOS API address and read-only user |
-| `…_MAC` | Router ether1 MAC, used as device identity |
+| `…_HOST`, `…_USER` | RouterOS API address and read-only user (required) |
+| `…_IP` | IPv4 shown for the device in UniFi; default: `…_HOST` |
+| `…_MAC` | Device identity; default `auto` = RouterOS ether1 MAC |
+| `…_MAP` | Port map file in the container, or `auto`; default: the bundled map for the model |
 | `…_NEIGHBOR_ALIASES` | Optional `real=reported,...` neighbor MAC rewrites (see below) |
 | `…_POLL_INTERVAL` | RouterOS read interval in seconds (RB5009 15, mAP lite 30) |
 | `MTUNIFI_RB5009_POE_BUDGET_W` | Total PoE-out budget in W shown as "PoE in use" |
@@ -109,7 +127,8 @@ The compose files also enable these emulator options (general `MTUNIFI_*` settin
 
 | Option | Effect |
 | --- | --- |
-| `MTUNIFI_DEVICE_MAC` | Explicit device MAC instead of a random local one |
+| `MTUNIFI_DEVICE_MAC` | Explicit device MAC, or `auto` to read the RouterOS ether1 MAC once |
+| `MTUNIFI_ROUTEROS_MAP_FILE=auto` | Map RouterOS ports to slots automatically |
 | `MTUNIFI_DEVICE_MODEL`, `MTUNIFI_DEVICE_VERSION` | Override the profile's model code / firmware version |
 | `MTUNIFI_HOSTNAME_FROM_IDENTITY` | Report the RouterOS identity as hostname |
 | `MTUNIFI_REPORT_UPLINK` | Send uplink `eth0` and `if_table` like real switches; without it the controller cannot build this device's uplink |
@@ -124,7 +143,7 @@ The compose files also enable these emulator options (general `MTUNIFI_*` settin
 ## Topology notes
 
 - **Device MAC.** UniFi links devices by MAC. Real UniFi devices report the router by
-  its LLDP chassis ID, which on RouterOS is the ether1 MAC. Use that as `…_MAC`.
+  its LLDP chassis ID, which on RouterOS is the ether1 MAC; `…_MAC=auto` uses it.
 - **Neighbor MAC rewrites.** Some neighbors answer from a port MAC that differs from
   the MAC UniFi knows them by (for example a UniFi switch port MAC ending one higher
   than the switch MAC, or the RB5009's ether5 MAC as seen by the mAP lite). Map them
@@ -168,6 +187,7 @@ and all ports). An adopted UniFi Security Gateway pins UniFi Network to version 
 | `scripts/unifi-topology.sh` | Logs in to your controller (credentials typed by you, not stored) and prints, read-only, each device's firmware, uplink, LLDP, downlinks, LAG and PoE fields. Set `UNIFI_URL=https://127.0.0.1:11443` on UniFi OS Server. |
 | `scripts/neighbors.py`, `scripts/port_macs.py` | Pipe `mtunifi diagnose` output to see neighbors, export reasons, FDB counts and bonds |
 | `scripts/poe_ports.py` | Pipe `probe-routeros` output to see PoE per port |
+| `scripts/setup-mikrotik.sh` | Interactive first-time setup: `.env`, password file, build and read-only probe |
 
 ## Limitations
 

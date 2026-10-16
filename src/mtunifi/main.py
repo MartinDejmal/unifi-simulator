@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from mtunifi.config import Settings
 from mtunifi.emulator import Emulator
 from mtunifi.profiles import profile
+from mtunifi.routeros import discover_device_mac
 from mtunifi.routeros_api import RouterOSError, api_target
 from mtunifi.scenario import ScenarioError, SyntheticSource
 from mtunifi.sources import create_source
@@ -167,7 +168,13 @@ def main() -> int:
             raise ValueError("Use probe-routeros for observed telemetry")
         source = create_source(settings) if args.command != "init" else None
         with store.lock():
-            state = store.load_or_create(settings.device_mac)
+            configured_mac = settings.device_mac
+            if configured_mac == "auto":
+                # Read once for a new identity; an existing identity keeps its MAC.
+                configured_mac = (
+                    None if store.path.exists() else asyncio.run(discover_device_mac(settings))
+                )
+            state = store.load_or_create(configured_mac)
             state.bind(
                 settings.profile,
                 settings.routeros_host if settings.telemetry_source == "routeros" else None,

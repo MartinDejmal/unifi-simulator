@@ -33,9 +33,11 @@ remain to be verified.
 | Applying controller configuration to MikroTik | Unsupported by design |
 
 **MikroTik RB5009 / mAP lite:** ready-made Compose files show both routers as UniFi
-switches with ports, clients, topology map, LACP and PoE. Site values (addresses, API
-user, MACs) go into local `.env` files that are never committed. Start with the
-[step-by-step guide](docs/mikrotik-routeros-switches.md).
+switches with ports, clients, topology map, LACP and PoE. `scripts/setup-mikrotik.sh`
+asks only for the controller URL, router address and read-only API account; the device
+MAC, ports, clients, neighbors and PoE are read from RouterOS. Site values stay in local
+`.env` files that are never committed. See the [step-by-step guide](docs/mikrotik-routeros-switches.md),
+including [what still needs manual input](docs/mikrotik-routeros-switches.md#what-is-automatic-and-what-is-not).
 
 ## Development quick start
 

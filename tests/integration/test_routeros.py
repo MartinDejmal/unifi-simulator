@@ -449,3 +449,19 @@ def test_poe_totals_sum_only_powered_ports():
         "total_max_effective_power": 130,
         "total_used_power": 9.1,
     }
+
+
+async def test_device_mac_and_port_map_can_be_discovered_from_routeros(routeros_peer):
+    from pathlib import Path
+
+    from mtunifi.routeros import discover_device_mac
+
+    peer = await routeros_peer()
+    assert await discover_device_mac(peer.settings()) == "dc:2c:6e:00:00:01"
+    settings = peer.settings().model_copy(update={"routeros_map_file": Path("auto")})
+    source = RouterOSSource(settings)
+    body = await source.collect(1, "")
+    names = [p.get("name") for p in body["port_table"]]
+    assert names[:6] == ["ether1", "ether2", "ether3", "ether4", "ether5", "sfp1"]
+    assert body["port_table"][0]["is_uplink"] and not body["port_table"][1]["is_uplink"]
+    assert source.last_summary["mapped_physical_ports"] == 6

@@ -8,13 +8,14 @@ services:
     container_name: mtunifi-maplite
     environment:
       MTUNIFI_INFORM_URL: ${MTUNIFI_INFORM_URL:?Set the controller /inform URL}
-      MTUNIFI_DEVICE_IP: ${MTUNIFI_MAPLITE_IP:?Set the IPv4 address shown for the device in UniFi}
+      # IPv4 shown in UniFi; defaults to the RouterOS address.
+      MTUNIFI_DEVICE_IP: ${MTUNIFI_MAPLITE_IP:-${MTUNIFI_MAPLITE_HOST}}
       MTUNIFI_HOSTNAME: ${MTUNIFI_MAPLITE_HOSTNAME:-mtunifi-maplite}
       MTUNIFI_PROFILE: maplite-experimental
       # Optional: the controller's current US8 firmware, so it stops offering an upgrade.
       MTUNIFI_DEVICE_VERSION: ${MTUNIFI_MAPLITE_VERSION:-}
-      # The RouterOS ether1 MAC (what the upstream router sees) instead of a synthetic one.
-      MTUNIFI_DEVICE_MAC: ${MTUNIFI_MAPLITE_MAC:?Set the RouterOS ether1 MAC}
+      # Device identity = RouterOS ether1 MAC (what the upstream router sees); "auto" reads it once.
+      MTUNIFI_DEVICE_MAC: ${MTUNIFI_MAPLITE_MAC:-auto}
       MTUNIFI_ROUTEROS_NEIGHBORS_RELAXED: "true"
       # Report uplink "eth0" + if_table like real UniFi switches (controller builds uplink).
       MTUNIFI_REPORT_UPLINK: "true"
@@ -30,7 +31,8 @@ services:
       MTUNIFI_ROUTEROS_TLS: "false"
       MTUNIFI_ROUTEROS_USER: ${MTUNIFI_MAPLITE_USER:?Set the read-only API user}
       MTUNIFI_ROUTEROS_PASSWORD_FILE: /run/secrets/maplite_password
-      MTUNIFI_ROUTEROS_MAP_FILE: /scenarios/routeros-maplite.json
+      # Port map for this model; "auto" maps the RouterOS ports in order instead.
+      MTUNIFI_ROUTEROS_MAP_FILE: ${MTUNIFI_MAPLITE_MAP:-/scenarios/routeros-maplite.json}
       # Small device (little free RAM, busy CPU): poll rarely.
       MTUNIFI_ROUTEROS_POLL_INTERVAL: ${MTUNIFI_MAPLITE_POLL_INTERVAL:-30}
       MTUNIFI_ROUTEROS_TIMEOUT: ${MTUNIFI_MAPLITE_TIMEOUT:-20}

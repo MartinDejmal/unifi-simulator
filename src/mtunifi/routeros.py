@@ -39,6 +39,8 @@ from mtunifi.snapshot import (
     unifi_snapshot,
 )
 
+AUTO_MAP = Path("auto")
+
 # Interface types that may fill a slot without an ethernet monitor (link speed unknown).
 UNMONITORED_TYPES = ("ether", "wlan", "wifi")
 BOND_TYPES = ("bond", "bonding")
@@ -371,12 +373,78 @@ def management_interface(body: dict, device_mac: str, device_ip: str) -> dict:
     return {"uplink": "eth0", "if_table": [entry]}
 
 
+def natural_key(name: str) -> tuple:
+    return tuple(int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name))
+
+
+def ether1(rows: list[dict]) -> dict | None:
+    """The router's first Ethernet port: default-name ether1, else the lowest ether name."""
+    by_default = [r for r in rows if r.get("default-name") == "ether1"]
+    if by_default:
+        return by_default[0]
+    ethers = sorted(
+        (r for r in rows if str(r.get("name", "")).startswith("ether")),
+        key=lambda r: natural_key(r["name"]),
+    )
+    return ethers[0] if ethers else None
+
+
+async def discover_device_mac(settings: Settings) -> str:
+    """Read the ether1 MAC (RouterOS LLDP chassis ID) for a new device identity."""
+    api = RouterOSAPI(settings)
+    async with asyncio.timeout(settings.routeros_timeout):
+        async with api:
+            row = ether1(await api.table(Table.ETHERNET))
+    mac = mac_address(row.get("mac-address")) if row else None
+    if mac is None or int(mac[:2], 16) & 1:
+        raise RouterOSError("device-mac-unavailable", stage=Table.ETHERNET.value)
+    return mac
+
+
+async def auto_mapping(api: RouterOSAPI, profile_name: str) -> RouterOSMap:
+    """Map RouterOS ports to slots in order: ether*, sfp*, other Ethernet-type, wireless."""
+    ethernet = await api.table(Table.ETHERNET)
+    interfaces = await api.table(Table.INTERFACES)
+    names = [str(r.get("name")) for r in ethernet if r.get("name")]
+
+    def group(name: str) -> int:
+        return 0 if name.startswith("ether") else 1 if name.startswith("sfp") else 2
+
+    ordered = sorted(names, key=lambda n: (group(n), natural_key(n)))
+    known = set(ordered)
+    others = sorted(
+        (
+            str(r["name"])
+            for r in interfaces
+            if r.get("name") and r["name"] not in known and r.get("type") == "ether"
+        ),
+        key=natural_key,
+    )
+    wireless = sorted(
+        (str(r["name"]) for r in interfaces if r.get("type") in ("wlan", "wifi") and r.get("name")),
+        key=natural_key,
+    )
+    slots = (ordered + others + wireless)[: profile(profile_name).port_count]
+    if not slots:
+        raise RouterOSError("no-physical-ports", stage=Table.ETHERNET.value)
+    first = ether1(ethernet)
+    uplink = first.get("name") if first else slots[0]
+    return RouterOSMap(
+        profile=profile_name,
+        ports=[
+            PortMapping(port_idx=i, interface=name, is_uplink=name == uplink)
+            for i, name in enumerate(slots, 1)
+        ],
+    )
+
+
 class RouterOSSource:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.gateway = profile(settings.profile).kind == "gateway"
         self.mapping = None
-        if settings.routeros_map_file is not None:
+        self._auto_map = settings.routeros_map_file == AUTO_MAP
+        if settings.routeros_map_file is not None and not self._auto_map:
             self.mapping = load_mapping(settings.routeros_map_file)
             if self.mapping.profile != settings.profile:
                 if not self.gateway:
@@ -408,6 +476,8 @@ class RouterOSSource:
                     # One bounded session per poll: failures reconnect without sharing credentials
                     # or a socket with another device. Secret rotations apply on the next poll.
                     async with api:
+                        if self._auto_map and self.mapping is None:
+                            self.mapping = await auto_mapping(api, self.settings.profile)
                         if self.gateway:
                             snapshot = await collect_gateway(api, self.settings)
                             if self.mapping is not None:

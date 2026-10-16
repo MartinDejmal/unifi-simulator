@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import Field, ValidationError, model_validator
 
 from mtunifi.config import Settings
+from mtunifi.routeros import AUTO_MAP
 from mtunifi.scenario import LabModel
 from mtunifi.storage import Store
 
@@ -62,7 +63,7 @@ def load_inventory(path: Path) -> Inventory:
             "routeros_map_file",
         ):
             value = getattr(settings, field)
-            if value is not None:
+            if value is not None and value != AUTO_MAP:
                 setattr(settings, field, (path.resolve().parent / value).resolve())
         directory = settings.state_dir
         if any(

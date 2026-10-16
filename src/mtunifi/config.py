@@ -33,8 +33,11 @@ class Settings(BaseModel):
     # Optional firmware version reported to the controller (e.g. its current release for
     # the model, so it stops offering an upgrade); defaults to the profile's version.
     device_version: str | None = Field(default=None, pattern=r"^\d{1,4}(\.\d{1,8}){1,4}$")
-    # Optional explicit device MAC (e.g. the RouterOS LLDP chassis MAC) instead of a synthetic one.
-    device_mac: str | None = Field(default=None, pattern=r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+    # Optional explicit device MAC (e.g. the RouterOS LLDP chassis MAC) instead of a synthetic
+    # one; "auto" reads the RouterOS ether1 MAC once, when the identity is first created.
+    device_mac: str | None = Field(
+        default=None, pattern=r"^(auto|([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})$"
+    )
     packet_version: int = Field(default=1, ge=0, le=1)
     encryption: str = "cbc"
     interval: float = Field(default=10, ge=1, le=300)
@@ -48,6 +51,7 @@ class Settings(BaseModel):
     routeros_user: str | None = Field(default=None, min_length=1, max_length=128, repr=False)
     routeros_password_file: Path | None = None
     routeros_ca_file: Path | None = None
+    # Port map JSON, or "auto" to map the RouterOS ports in order (ether, sfp, wlan).
     routeros_map_file: Path | None = None
     routeros_timeout: float = Field(default=10, ge=1, le=120)
     routeros_poll_interval: float = Field(default=10, ge=5, le=300)
@@ -117,6 +121,8 @@ class Settings(BaseModel):
     @field_validator("device_mac")
     @classmethod
     def unicast_mac(cls, value):
+        if value == "auto":
+            return value
         if value is not None and int(value[:2], 16) & 1:
             raise ValueError("Device MAC must be unicast")
         return value.lower() if value else value

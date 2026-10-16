@@ -10,14 +10,15 @@ services:
     container_name: mtunifi-rb5009
     environment:
       MTUNIFI_INFORM_URL: ${MTUNIFI_INFORM_URL:?Set the controller /inform URL}
-      MTUNIFI_DEVICE_IP: ${MTUNIFI_RB5009_IP:?Set the IPv4 address shown for the device in UniFi}
+      # IPv4 shown in UniFi; defaults to the RouterOS address.
+      MTUNIFI_DEVICE_IP: ${MTUNIFI_RB5009_IP:-${MTUNIFI_RB5009_HOST}}
       MTUNIFI_HOSTNAME: ${MTUNIFI_RB5009_HOSTNAME:-mtunifi-rb5009}
       MTUNIFI_HOSTNAME_FROM_IDENTITY: "true"
       MTUNIFI_PROFILE: rb5009-switch-experimental
       # Same layout as USWED36 plus PoE.
       MTUNIFI_DEVICE_MODEL: ${MTUNIFI_RB5009_MODEL:-USWED37}
-      # The RouterOS LLDP chassis ID (ether1 MAC): real devices name their uplink with it.
-      MTUNIFI_DEVICE_MAC: ${MTUNIFI_RB5009_MAC:?Set the RouterOS ether1 MAC}
+      # Device identity = RouterOS ether1 MAC (its LLDP chassis ID); "auto" reads it once.
+      MTUNIFI_DEVICE_MAC: ${MTUNIFI_RB5009_MAC:-auto}
       MTUNIFI_ROUTEROS_NEIGHBORS_RELAXED: "true"
       # Report uplink "eth0" + if_table like real UniFi switches (controller builds uplink).
       MTUNIFI_REPORT_UPLINK: "true"
@@ -41,7 +42,8 @@ services:
       MTUNIFI_ROUTEROS_TLS: "false"
       MTUNIFI_ROUTEROS_USER: ${MTUNIFI_RB5009_USER:?Set the read-only API user}
       MTUNIFI_ROUTEROS_PASSWORD_FILE: /run/secrets/rb5009_password
-      MTUNIFI_ROUTEROS_MAP_FILE: /scenarios/routeros-rb5009-switch.json
+      # Port map for this model; "auto" maps the RouterOS ports in order instead.
+      MTUNIFI_ROUTEROS_MAP_FILE: ${MTUNIFI_RB5009_MAP:-/scenarios/routeros-rb5009-switch.json}
       MTUNIFI_ROUTEROS_POLL_INTERVAL: ${MTUNIFI_RB5009_POLL_INTERVAL:-15}
       MTUNIFI_ROUTEROS_TIMEOUT: ${MTUNIFI_RB5009_TIMEOUT:-20}
     volumes:

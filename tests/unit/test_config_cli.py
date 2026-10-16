@@ -76,3 +76,12 @@ def test_device_version_override_is_validated():
     assert Settings(device_version="7.5.15.1234").device_version == "7.5.15.1234"
     with pytest.raises(ValueError):
         Settings(device_version="7.5; rm")
+
+
+def test_device_mac_accepts_auto_and_unicast_only():
+    from mtunifi.config import Settings
+
+    assert Settings(device_mac="auto").device_mac == "auto"
+    assert Settings(device_mac="00:00:5E:00:53:01").device_mac == "00:00:5e:00:53:01"
+    with pytest.raises(ValueError):
+        Settings(device_mac="01:00:5e:00:53:01")
